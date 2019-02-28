@@ -7,12 +7,10 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
-type OrdinoDataEntry struct {
-	Ordval      float64
-	Artid       string
-	Segment     string
-	Publication string
-	Source      string
+type SegmentPublicationArticle struct {
+	Articleid string
+	Score     float64
+	Source    string
 }
 
 var pool *redis.Pool
@@ -32,46 +30,88 @@ func newPool() *redis.Pool {
 }
 
 func init() {
-	fmt.Println("init...")
 	pool = newPool()
 }
 
-func ordinoGet() OrdinoDataEntry {
+/********************************
+ORDINO READ
+********************************/
+func ordinoRead(publication string, segment string) (entry []SegmentPublicationArticle) {
 	conn := pool.Get()
 	defer conn.Close()
 
-	data, err := redis.Values(conn.Do("HGETALL", "ordinoData:1"))
+	list, err := redis.Strings(conn.Do("LRANGE", segment+publication, 0, 10))
 	if err != nil {
 		log.Fatal(err)
 	}
-	entry := OrdinoDataEntry{}
-	err = redis.ScanStruct(data, &entry)
-	if err != nil {
-		log.Fatal(err)
+	entries := []SegmentPublicationArticle{}
+	for _, articleid := range list {
+		data, err := redis.Values(conn.Do("HGETALL", segment+publication+articleid))
+		if err != nil {
+			log.Fatal(err)
+		}
+		entry := SegmentPublicationArticle{}
+		err = redis.ScanStruct(data, &entry)
+		if err != nil {
+			log.Fatal(err)
+		}
+		entries = append(entries, entry)
+
 	}
-	return entry
+	return entries
 }
 
-func ordinoSet() {
+/********************************
+ORDINO WRITE
+********************************/
+func ordinoWrite(segment string, publication string, articleid string, score float64, source string) {
 	conn := pool.Get()
 	defer conn.Close()
 
-	ordinoDataEntry := OrdinoDataEntry{0.5, "1234567", "age", "www.an.no", "billboard"}
-	_, err := conn.Do("HMSET", redis.Args{"ordinoData:1"}.AddFlat(ordinoDataEntry)...)
+	/*Check if key exists */
+	exists, err := conn.Do("EXISTS", segment+publication+articleid)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	if exists.(int64) == 1 {
+		resp, err := conn.Do("HGET", segment+publication+articleid, "Score")
+		//existingScore := resp.Float64()
+		if err != nil {
+			log.Fatal(err)
+		}
+		update := resp //math.Max(resp, score)
+		_, err = conn.Do("HMSET", "Score", update)
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		/* Push new articleid to seg_pub list */
+		//implement limit on list
+		_, err := conn.Do("LPUSH", segment+publication, articleid)
+		if err != nil {
+			log.Fatal(err)
+		}
+		/* create record for new item in list */
+		segPubArt := SegmentPublicationArticle{articleid, score, source}
+		_, err = conn.Do("HMSET", redis.Args{segment + publication + articleid}.AddFlat(segPubArt)...)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 }
+
+/********************************
+MAIN
+********************************/
 
 func main() {
-	ordinoSet()
-	//entry := OrdinoDataEntry{}
-	entry := ordinoGet()
-	//entry, err := populateOrdinoEntry(res)
-	fmt.Println(entry.Ordval)
-	fmt.Println(entry.Segment)
-	fmt.Println(entry.Artid)
-	fmt.Println(entry.Publication)
-	fmt.Println(entry.Source)
-
+	ordinoWrite("age", "www.an.no", "133445", 0.6, "billboard")
+	res := ordinoRead("www.an.no", "age")
+	for _, entry := range res {
+		fmt.Println(entry.Articleid)
+		fmt.Println(entry.Source)
+		fmt.Println(entry.Score)
+	}
 }
